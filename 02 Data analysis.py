@@ -13,86 +13,96 @@ import seaborn as sns
 from matplotlib import style
 import pandas as pd
 import numpy as np
-import pandas_datareader.data as web
-import re
-from zipfile import ZipFile
-import statsmodels.api as sm
-import urllib
-import io
-from pyfinance.ols import PandasRollingOLS
+import scikits.statsmodels.api as sm
+import statsmodels.formula.api as smf
+from statsmodels.regression.rolling import RollingOLS
 
 #%% Import of previously cleansed data
 
 # Family_table = pd.read_csv('Family_table.csv', low_memory = False)
 
 # Removal of fund managers that have no relative working in fund industry, too 
-Family_table = Family_table.dropna(subset = ['Relation_class_1'])
+#Family_table_2 = Family_table.dropna(subset = ['Relation_class_1'])
 
 #%% Creating dummy variables for multivariate regression
 
-Family_table.fillna({'B1': 0, 'B2': 0, 'B3': 0, 'MBA1': 0, 'MBA2': 0, 'M1': 0, 
+Family_table_2 = Family_table
+
+Family_table_2.fillna({'B1': 0, 'B2': 0, 'B3': 0, 'MBA1': 0, 'MBA2': 0, 'M1': 0, 
                      'M2': 0, 'M3': 0, 'P1': 0, 'P2': 0, 'JD': 0, 'MD': 0, 
                      'Relation_class_1': 'Unrelated', 'index_fund_flag_crsp': 0}, inplace = True)
 
-Family_table = pd.get_dummies(Family_table, columns = ['Gender', 'Relation_class_1'], drop_first = True)
+Family_table_2 = pd.get_dummies(Family_table_2, columns = ['Gender', 'Relation_class_1'], drop_first = True)
 
-print(Family_table.head())
+print(Family_table_2.head())
 
 #%% Calculating excess and (36-month trailing returns)
 
 # 36-month trailing returns: not possible due to a limited number of observations
-Family_table['fund_mret_36m_avrg'] = Family_table.groupby(['MS_ManagerName', 'crsp_cl_grp_crsp']).fund_mret.rolling(window = 3).mean().sort_index(level = 1).values
+#Family_table['fund_mret_36m_avrg'] = Family_table.groupby(['MS_ManagerName', 'crsp_cl_grp_crsp']).fund_mret.rolling(window = 3).mean().sort_index(level = 1).values
 
 #Excess returns
-Family_table['XReturn'] = (Family_table['fund_mret']*100 - Family_table['RF'])
-Family_table['Alpha'] = (Family_table['XReturn'] - Family_table['MKT-RF'] - Family_table['SMB'] - Family_table['HML'] - Family_table['MOM'] )
+Family_table_2['XReturn'] = (Family_table_2['fund_mret']*100 - Family_table_2['RF'])
+Family_table_2['Alpha'] = (Family_table_2['XReturn'] - Family_table_2['MKT-RF'] - Family_table_2['SMB'] - Family_table_2['HML'] - Family_table_2['MOM'] )
 
-print(Family_table.head())
-print(Family_table.dtypes)
-print(Family_table.tail())
+print(Family_table_2.head())
+print(Family_table_2.dtypes)
+print(Family_table_2.tail())
 
 #%%
 
-#Family_table.shape
-#Family_table.describe()
+exog_vars = ['MKT-RF', 'SMB', 'HML', 'MOM']
+endog = Family_table_2.XReturn
+exog = sm.add_constant(Family_table_2[exog_vars])
+rols = RollingOLS(endog, exog, window = 12)
+rres = rols.fit()
+params = rres.params
+print(params.head())
+print(params.tail())
+
+#%%
+
+def ols_coef(x,formula):
+    return smf.ols(formula,data=x).fit().params
+
+gamma = (Family_table_2.groupby('crsp_cl_grp_crsp').apply(ols_coef,'XReturn ~ 1 + SMB + HML + MOM'))
+gamma.head()    
+
+#%%
+def ols_res(df, xcols,  ycol):
+    return sm.OLS(df[ycol], df[xcols]).fit().predict()
+
+Family_table_2['TTE'] = Family_table_2.groupby('crsp_cl_grp_crsp').apply(lambda x: x.rolling(window = 3, min_periods = 1)).apply(ols_res, xcols=['MKT-RF', 'SMB'], ycol='XReturn')
+
+#%%
+
+#Family_table_2.shape
+#Family_table_2.describe()
 
 #def ols_res(df, xcols, ycol):
 #    return sm.OLS(df[ycol], df[xcols]).fit().predict()
 
-#y = Family_table.groupby('crsp_cl_grp_crsp').apply(ols_res, xcols = ['MKT-RF', 'SMB', 'HML', 'MOM'], ycol = 'XReturn')
+#y = Family_table_2.groupby('crsp_cl_grp_crsp').apply(ols_res, xcols = ['MKT-RF', 'SMB', 'HML', 'MOM'], ycol = 'XReturn')
 
 def ols_predict(indices, result, ycol, xcols):
     roll_df = df.loc[indices] # get relevant data frame subset
-    result[indices[-1]] = sm.OLS(roll_df[ycol], roll_df[xcols]).fit().predict()
+    result[indices[-1,:]] = sm.OLS(roll_df[ycol], roll_df[xcols]).fit().predict()
     return 0 # value is irrelvant here
 
 # define kwargs to be fet to the ols_predict
-kwargs = {"xcols": ['MKT-RF', 'SMB', 'HML', 'MOM'], 
-          "ycol": 'XReturn', "result": {}}
+kwargs = {'xcols': ['MKT-RF', 'SMB', 'HML', 'MOM'], 
+          'ycol': 'XReturn', 'result': {}}
 
 # iterate id's sub data frames and call ols for rolling windows
-Family_table["crsp_cl_grp_crsp"] = Family_table.index
-for idx, sub_df in Family_table.groupby("crsp_cl_grp_crsp"):
-    sub_df["crsp_cl_grp_crsp"].rolling(12, min_periods=6).apply(ols_predict, kwargs = kwargs)
+Family_table_2['crsp_cl_grp_crsp'] = Family_table_2.index
+for idx, sub_df in Family_table_2.groupby('crsp_cl_grp_crsp'):
+    sub_df['crsp_cl_grp_crsp'].rolling(12, min_periods=6).apply(ols_predict, kwargs = kwargs)
 
 # write results back to original df
-Family_table["parameters"] = pd.Series(kwargs["result"])
+Family_table_2["parameters"] = pd.Series(kwargs["result"])
 
 # showing the last 5 computed values
-print(Family_table["parameters"].tail())
-
-#model = pd.stats.ols.MovingOLS(y = Family_table.XReturn, x = Family_table, 
-                            #   window_type='rolling', window=12, intercept=True)
-#Family_table['Y_hat'] = model.y_predict
-
-
-#y = Family_table.groupby(['crsp_cl_grp_crsp']).XReturn
-#x = Family_table.groupby(['crsp_cl_grp_crsp'])[['MKT-RF', 'SMB', 'HML', 'MOM']]
-#window = immer bis X erreicht ist
-
-#model = PandasRollingOLS(y = y, x = x, window = window)
-
-#print(model.beta)
+print(Family_table_2["parameters"].tail())
 
 #%%
 return_per_class = Family_table.groupby(['MS_ManagerName', 'Relation_class_1', 'crsp_cl_grp_crsp']
